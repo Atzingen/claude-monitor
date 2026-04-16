@@ -40,10 +40,15 @@ class ClaudeSession:
     project_name: str = ""
     last_modified: str = ""
     slug: str = ""
+    last_prompt: str = ""
     # state detection
     last_message_role: str = ""  # "user" or "assistant"
     last_message_time: str = ""
     jsonl_path: Path | None = None
+    # token usage
+    context_tokens: int = 0  # cache_read (current context size)
+    input_tokens: int = 0  # new + cache_creation
+    output_tokens: int = 0  # generated tokens
 
     @property
     def started_at_str(self) -> str:
@@ -68,6 +73,21 @@ class ClaudeSession:
         if self.project_name:
             return self.project_name
         return Path(self.cwd).name if self.cwd else "unknown"
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def context_display(self) -> str:
+        """Format context tokens as human-readable (e.g. '103k')."""
+        if self.context_tokens == 0:
+            return "-"
+        if self.context_tokens >= 1_000_000:
+            return f"{self.context_tokens / 1_000_000:.1f}M"
+        if self.context_tokens >= 1_000:
+            return f"{self.context_tokens / 1_000:.0f}k"
+        return str(self.context_tokens)
 
     @property
     def activity_status(self) -> str:
@@ -160,6 +180,21 @@ def _read_jsonl_tail(jsonl_path: Path, max_lines: int = 50) -> list[dict]:
         return []
 
 
+def _extract_user_text(entry: dict) -> str:
+    """Extract text content from a user message entry."""
+    msg = entry.get("message", {})
+    if not isinstance(msg, dict):
+        return ""
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return block.get("text", "")
+    elif isinstance(content, str):
+        return content
+    return ""
+
+
 def _enrich_from_jsonl(session: ClaudeSession) -> None:
     """Enrich session with data from its JSONL conversation file."""
     jsonl_path = _find_jsonl(session.session_id)
@@ -172,14 +207,18 @@ def _enrich_from_jsonl(session: ClaudeSession) -> None:
     if not session.project_name:
         session.project_name = _project_dir_to_name(jsonl_path.parent.name, session.cwd)
 
-    # read tail to get state + count messages
+    # read tail to get state + recent context
     entries = _read_jsonl_tail(jsonl_path, max_lines=200)
 
     msg_count = 0
     last_role = ""
     last_time = ""
     first_user_text = ""
+    last_user_text = ""
     slug = ""
+    last_context_tokens = 0
+    last_input_tokens = 0
+    last_output_tokens = 0
 
     for entry in entries:
         entry_type = entry.get("type", "")
@@ -191,49 +230,72 @@ def _enrich_from_jsonl(session: ClaudeSession) -> None:
         if not slug:
             slug = entry.get("slug", "")
 
-        # get first user prompt
-        if entry_type == "user" and not first_user_text:
+        # extract user prompts
+        if entry_type == "user":
+            text = _extract_user_text(entry)
+            if text:
+                if not first_user_text:
+                    first_user_text = text
+                last_user_text = text
+
+        # extract token usage from last assistant message
+        if entry_type == "assistant":
             msg = entry.get("message", {})
             if isinstance(msg, dict):
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            first_user_text = block.get("text", "")
-                            break
-                elif isinstance(content, str):
-                    first_user_text = content
+                usage = msg.get("usage", {})
+                if usage:
+                    last_context_tokens = usage.get("cache_read_input_tokens", 0)
+                    last_input_tokens = (
+                        usage.get("input_tokens", 0)
+                        + usage.get("cache_creation_input_tokens", 0)
+                    )
+                    last_output_tokens = usage.get("output_tokens", 0)
 
-    # also do a rough full count by reading file line count
-    try:
-        with open(jsonl_path, "r", encoding="utf-8") as f:
-            total_lines = sum(1 for _ in f)
-        # approximate: about 60% of lines are user/assistant messages
-        # but we'll use what we counted from the tail as a minimum
-        session.message_count = max(msg_count, _count_messages_fast(jsonl_path))
-    except OSError:
-        session.message_count = msg_count
+    # full message count from file scan
+    session.message_count = max(msg_count, _count_and_sum_tokens(jsonl_path, session))
 
     session.last_message_role = last_role
     session.last_message_time = last_time
     session.slug = slug
+    session.context_tokens = last_context_tokens
+
     if first_user_text and not session.first_prompt:
         session.first_prompt = first_user_text
+    if last_user_text:
+        session.last_prompt = last_user_text
 
 
-def _count_messages_fast(jsonl_path: Path) -> int:
-    """Count user+assistant messages by scanning the file for type fields."""
+def _count_and_sum_tokens(jsonl_path: Path, session: ClaudeSession) -> int:
+    """Count messages and sum total token usage across the full session."""
     count = 0
+    total_input = 0
+    total_output = 0
     try:
         with open(jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
-                # fast check without full JSON parse
-                if '"type":"assistant"' in line or '"type": "assistant"' in line:
+                if '"type": "assistant"' in line or '"type":"assistant"' in line:
                     count += 1
-                elif '"type":"user"' in line or '"type": "user"' in line:
+                    # parse for token usage
+                    try:
+                        data = json.loads(line)
+                        msg = data.get("message", {})
+                        if isinstance(msg, dict):
+                            usage = msg.get("usage", {})
+                            if usage:
+                                total_input += (
+                                    usage.get("input_tokens", 0)
+                                    + usage.get("cache_creation_input_tokens", 0)
+                                )
+                                total_output += usage.get("output_tokens", 0)
+                    except json.JSONDecodeError:
+                        pass
+                elif '"type": "user"' in line or '"type":"user"' in line:
                     count += 1
     except OSError:
         pass
+
+    session.input_tokens = total_input
+    session.output_tokens = total_output
     return count
 
 

@@ -55,16 +55,25 @@ class SessionDetailPanel(Static):
         lines.append(f"[dim]Started:[/]   {session.started_at_str}")
         lines.append(f"[dim]Runtime:[/]   {session.runtime_str}")
         lines.append(f"[dim]Messages:[/]  {session.message_count}")
+        lines.append(f"[dim]Context:[/]   {session.context_display}")
+        lines.append(f"[dim]Tokens:[/]    {session.input_tokens:,} in / {session.output_tokens:,} out")
         if session.git_branch:
             lines.append(f"[dim]Branch:[/]    {session.git_branch}")
         if session.last_message_time:
             lines.append(f"[dim]Last msg:[/]  {session.last_message_time}")
         if session.first_prompt:
-            prompt_preview = session.first_prompt[:300]
-            if len(session.first_prompt) > 300:
+            prompt_preview = session.first_prompt[:200]
+            if len(session.first_prompt) > 200:
                 prompt_preview += "..."
             lines.append("")
             lines.append(f"[bold]First prompt:[/]")
+            lines.append(f"[italic]{prompt_preview}[/]")
+        if session.last_prompt:
+            prompt_preview = session.last_prompt[:200]
+            if len(session.last_prompt) > 200:
+                prompt_preview += "..."
+            lines.append("")
+            lines.append(f"[bold]Last prompt:[/]")
             lines.append(f"[italic]{prompt_preview}[/]")
 
         self.update("\n".join(lines))
@@ -83,7 +92,7 @@ class ClaudeMonitorApp(App):
 
     #left-panel {
         width: 2fr;
-        min-width: 50;
+        min-width: 55;
         border-right: solid $primary;
     }
 
@@ -106,6 +115,14 @@ class ClaudeMonitorApp(App):
     #conversation-log {
         height: 1fr;
         padding: 0 1;
+    }
+
+    #totals-bar {
+        height: auto;
+        max-height: 5;
+        padding: 0 1;
+        background: $surface;
+        border-top: solid $primary;
     }
 
     #status-bar {
@@ -136,6 +153,7 @@ class ClaudeMonitorApp(App):
         with Horizontal(id="main-container"):
             with Vertical(id="left-panel"):
                 yield DataTable(id="sessions-table", cursor_type="row")
+                yield Label("", id="totals-bar")
             with Vertical(id="right-panel"):
                 yield SessionDetailPanel(id="detail-panel")
                 yield RichLog(id="conversation-log", wrap=True, highlight=True, markup=True)
@@ -144,7 +162,7 @@ class ClaudeMonitorApp(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#sessions-table", DataTable)
-        table.add_columns("Status", "Project", "PID", "Runtime", "Msgs")
+        table.add_columns("Status", "Project", "PID", "Runtime", "Msgs", "Context")
         table.focus()
         self._do_refresh()
         self.set_interval(REFRESH_INTERVAL, self._do_refresh)
@@ -203,6 +221,7 @@ class ClaudeMonitorApp(App):
                 str(s.pid),
                 s.runtime_str,
                 str(s.message_count),
+                s.context_display,
                 key=s.session_id,
             )
 
@@ -210,11 +229,33 @@ class ClaudeMonitorApp(App):
             for i, s in enumerate(sessions):
                 if s.session_id == selected_sid:
                     table.move_cursor(row=i)
-                    # update selected_session with fresh data
                     self.selected_session = s
                     break
 
+        self._update_totals_bar()
         self._update_status_bar()
+
+    def _format_tokens(self, n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.0f}k"
+        return str(n)
+
+    def _update_totals_bar(self) -> None:
+        total_input = sum(s.input_tokens for s in self.sessions)
+        total_output = sum(s.output_tokens for s in self.sessions)
+        total_all = total_input + total_output
+
+        lines = []
+        lines.append(
+            f"[bold]Session totals:[/] "
+            f"{self._format_tokens(total_input)} in / "
+            f"{self._format_tokens(total_output)} out / "
+            f"{self._format_tokens(total_all)} total"
+        )
+
+        self.query_one("#totals-bar", Label).update("\n".join(lines))
 
     def _update_status_bar(self) -> None:
         alive = sum(1 for s in self.sessions if s.is_alive)
