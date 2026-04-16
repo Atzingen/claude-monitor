@@ -10,15 +10,30 @@ import time
 import psutil
 
 
-def _get_shell_create_times() -> dict[int, float]:
-    """Map shell PID -> creation time for all pwsh/bash shells under WindowsTerminal."""
+def _find_wt_pid() -> int | None:
+    """Find the WindowsTerminal.exe PID."""
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            if "terminal" in proc.info["name"].lower():
+                return proc.info["pid"]
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return None
+
+
+def _get_all_wt_shells(wt_pid: int) -> dict[int, float]:
+    """Map shell PID -> creation time for ALL shells directly under WindowsTerminal.
+
+    Counts every tab, not just those running Claude Code.
+    """
     shells: dict[int, float] = {}
+    shell_names = {"pwsh.exe", "powershell.exe", "bash.exe", "zsh.exe", "cmd.exe"}
     for proc in psutil.process_iter(["pid", "name", "create_time"]):
         try:
             name = proc.info["name"].lower()
-            if name in ("pwsh.exe", "powershell.exe", "bash.exe", "zsh.exe", "cmd.exe"):
+            if name in shell_names:
                 parent = proc.parent()
-                if parent and "terminal" in parent.name().lower():
+                if parent and parent.pid == wt_pid:
                     shells[proc.info["pid"]] = proc.info["create_time"]
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
@@ -26,10 +41,10 @@ def _get_shell_create_times() -> dict[int, float]:
 
 
 def _find_tab_index(claude_pid: int) -> int | None:
-    """Find the approximate tab index (1-based) for a Claude Code session.
+    """Find the tab index (1-based) for a Claude Code session.
 
-    Maps claude PID -> parent shell PID -> creation order among all
-    shells under WindowsTerminal. Tab order approximates creation order.
+    Counts ALL tabs in the WindowsTerminal (not just Claude ones)
+    to match the Ctrl+Alt+N shortcut numbering.
     """
     try:
         proc = psutil.Process(claude_pid)
@@ -40,13 +55,16 @@ def _find_tab_index(claude_pid: int) -> int | None:
         return None
 
     shell_pid = parent.pid
-    shell_times = _get_shell_create_times()
+    wt_pid = _find_wt_pid()
+    if wt_pid is None:
+        return None
 
-    if shell_pid not in shell_times:
+    all_shells = _get_all_wt_shells(wt_pid)
+    if shell_pid not in all_shells:
         return None
 
     # sort by creation time to get tab order
-    sorted_pids = sorted(shell_times.keys(), key=lambda p: shell_times[p])
+    sorted_pids = sorted(all_shells.keys(), key=lambda p: all_shells[p])
     try:
         return sorted_pids.index(shell_pid) + 1  # 1-based
     except ValueError:
