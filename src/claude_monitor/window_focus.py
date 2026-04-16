@@ -8,30 +8,40 @@ import sys
 
 import psutil
 
+# Windows terminal host process names (lowercase)
+TERMINAL_HOSTS = {
+    "windowsterminal.exe", "code.exe", "cmd.exe", "conhost.exe",
+    "wezterm-gui.exe", "alacritty.exe", "hyper.exe", "tabby.exe",
+    "wt.exe", "terminal.exe", "powershell.exe", "pwsh.exe",
+    "mintty.exe", "iterm2", "ghostty.exe",
+}
+
 
 def _find_terminal_pid(claude_pid: int) -> int | None:
     """Walk up the process tree from claude.exe to find the terminal window host.
 
-    Typical chain: claude.exe -> pwsh.exe -> WindowsTerminal.exe
-    Or: claude.exe -> pwsh.exe -> Code.exe (VSCode integrated terminal)
+    Collects all ancestor PIDs that might own a visible window, then returns
+    the one that actually has one.
     """
     try:
         proc = psutil.Process(claude_pid)
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return None
 
-    # walk up to find a process that owns a visible window
+    # collect ancestors up to 6 levels
+    ancestors: list[int] = []
     current = proc
-    for _ in range(5):
+    for _ in range(6):
         parent = current.parent()
         if parent is None:
             break
-        name = parent.name().lower()
-        if name in ("windowsterminal.exe", "code.exe", "cmd.exe", "conhost.exe",
-                     "wezterm-gui.exe", "alacritty.exe", "hyper.exe", "tabby.exe",
-                     "wt.exe", "terminal.exe"):
-            return parent.pid
+        ancestors.append(parent.pid)
         current = parent
+
+    # return the first ancestor that has a visible window
+    for pid in ancestors:
+        if _find_window_by_pid(pid) is not None:
+            return pid
 
     return None
 
@@ -82,9 +92,26 @@ def focus_terminal_window(claude_pid: int) -> bool:
 
     # restore if minimized
     SW_RESTORE = 9
+    SW_SHOW = 5
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, SW_RESTORE)
+    else:
+        user32.ShowWindow(hwnd, SW_SHOW)
 
-    # bring to foreground
+    # SetForegroundWindow has restrictions: only works if the calling thread
+    # is the foreground thread OR we use AllowSetForegroundWindow trick.
+    # We use the AttachThreadInput trick to bypass this.
+    foreground_hwnd = user32.GetForegroundWindow()
+    foreground_tid = user32.GetWindowThreadProcessId(foreground_hwnd, None)
+    current_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+
+    if foreground_tid != current_tid:
+        user32.AttachThreadInput(current_tid, foreground_tid, True)
+
+    user32.BringWindowToTop(hwnd)
     user32.SetForegroundWindow(hwnd)
+
+    if foreground_tid != current_tid:
+        user32.AttachThreadInput(current_tid, foreground_tid, False)
+
     return True
