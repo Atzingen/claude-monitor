@@ -193,10 +193,14 @@ class ClaudeMonitorApp(App):
 
     @work(thread=True)
     def _do_focus_terminal(self, pid: int) -> None:
-        ok = focus_terminal_window(pid)
+        ok, msg = focus_terminal_window(pid)
         if not ok:
             self.call_from_thread(
-                self.notify, "Could not find terminal window", severity="warning"
+                self.notify, msg, severity="warning"
+            )
+        else:
+            self.call_from_thread(
+                self.notify, msg, severity="information"
             )
 
     @work(thread=True)
