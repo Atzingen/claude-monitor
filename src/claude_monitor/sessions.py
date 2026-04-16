@@ -84,12 +84,12 @@ class ClaudeSession:
     def activity_display(self) -> str:
         status = self.activity_status
         if status == "processing":
-            return "[bold yellow]PROCESSING[/]"
+            return "[bold yellow]\u25cf PROCESSING[/]"
         if status == "waiting":
-            return "[bold green]WAITING[/]"
+            return "[bold green]\u25cf WAITING[/]"
         if status == "stopped":
-            return "[dim]STOPPED[/]"
-        return "[dim]...[/]"
+            return "[dim]\u25cf STOPPED[/]"
+        return "[dim]\u25cb ...[/]"
 
 
 def _get_alive_pids() -> set[int]:

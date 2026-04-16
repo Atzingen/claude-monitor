@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
-
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -17,14 +15,19 @@ from textual.widgets import (
     Label,
     RichLog,
     Static,
-    TabbedContent,
-    TabPane,
 )
 
 from claude_monitor.sessions import ClaudeSession, discover_sessions, get_conversation_text
 
 
 REFRESH_INTERVAL = 5.0
+
+STATUS_DISPLAY = {
+    "processing": Text("\u25cf PROCESSING", style="bold yellow"),
+    "waiting": Text("\u25cf WAITING", style="bold green"),
+    "stopped": Text("\u25cf stopped", style="dim"),
+    "unknown": Text("\u25cb ...", style="dim"),
+}
 
 
 class SessionDetailPanel(Static):
@@ -110,11 +113,12 @@ class ClaudeMonitorApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
-        Binding("c", "show_conversation", "Conversation"),
+        Binding("escape", "focus_table", "Back to list", show=True),
     ]
 
     sessions: reactive[list[ClaudeSession]] = reactive(list, recompose=False)
     selected_session: reactive[ClaudeSession | None] = reactive(None)
+    _viewing_conversation: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -129,11 +133,22 @@ class ClaudeMonitorApp(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#sessions-table", DataTable)
-        table.add_columns(
-            "Status", "Project", "PID", "Runtime", "Msgs"
-        )
+        table.add_columns("Status", "Project", "PID", "Runtime", "Msgs")
+        table.focus()
         self._do_refresh()
         self.set_interval(REFRESH_INTERVAL, self._do_refresh)
+
+    def action_focus_table(self) -> None:
+        """Return focus to the session list."""
+        self._viewing_conversation = False
+        table = self.query_one("#sessions-table", DataTable)
+        table.focus()
+        # restore detail panel for current selection
+        if self.selected_session:
+            self.query_one("#detail-panel", SessionDetailPanel).update_session(
+                self.selected_session
+            )
+        self._update_status_bar()
 
     @work(thread=True)
     def _do_refresh(self) -> None:
@@ -150,13 +165,7 @@ class ClaudeMonitorApp(App):
 
         table.clear()
         for s in sessions:
-            status_map = {
-                "processing": "PROCESSING",
-                "waiting": "WAITING",
-                "stopped": "stopped",
-                "unknown": "...",
-            }
-            status = status_map.get(s.activity_status, "?")
+            status = STATUS_DISPLAY.get(s.activity_status, STATUS_DISPLAY["unknown"])
             table.add_row(
                 status,
                 s.display_name,
@@ -172,13 +181,22 @@ class ClaudeMonitorApp(App):
                     table.move_cursor(row=i)
                     break
 
-        alive = sum(1 for s in sessions if s.is_alive)
-        processing = sum(1 for s in sessions if s.activity_status == "processing")
-        waiting = sum(1 for s in sessions if s.activity_status == "waiting")
-        total = len(sessions)
+        self._update_status_bar()
+
+    def _update_status_bar(self) -> None:
+        alive = sum(1 for s in self.sessions if s.is_alive)
+        processing = sum(1 for s in self.sessions if s.activity_status == "processing")
+        waiting = sum(1 for s in self.sessions if s.activity_status == "waiting")
+        total = len(self.sessions)
+
+        if self._viewing_conversation:
+            nav = "ESC: back to list | scroll: up/down | q: quit"
+        else:
+            nav = "Enter: view conversation | r: refresh | q: quit"
+
         self.query_one("#status-bar", Label).update(
-            f" {alive} alive ({processing} processing, {waiting} waiting) / "
-            f"{total} total | r: refresh | c: conversation | q: quit"
+            f" \u25cf {alive} alive ({processing} processing, {waiting} waiting) / "
+            f"{total} total | {nav}"
         )
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -188,17 +206,12 @@ class ClaudeMonitorApp(App):
         for s in self.sessions:
             if s.session_id == sid:
                 self.selected_session = s
-                self.query_one("#detail-panel", SessionDetailPanel).update_session(s)
+                if not self._viewing_conversation:
+                    self.query_one("#detail-panel", SessionDetailPanel).update_session(s)
                 break
 
     def action_refresh(self) -> None:
         self._do_refresh()
-
-    def action_show_conversation(self) -> None:
-        if self.selected_session is None:
-            self.notify("No session selected", severity="warning")
-            return
-        self._load_conversation(self.selected_session)
 
     @work(thread=True)
     def _load_conversation(self, session: ClaudeSession) -> None:
@@ -206,16 +219,20 @@ class ClaudeMonitorApp(App):
         self.call_from_thread(self._render_conversation, session, messages)
 
     def _render_conversation(self, session: ClaudeSession, messages: list) -> None:
+        self._viewing_conversation = True
         log = self.query_one("#conversation-log", RichLog)
         log.clear()
-        log.write(f"[bold]Conversation: {session.display_name}[/] ({len(messages)} recent messages)\n")
+        log.write(
+            f"[bold]Conversation: {session.display_name}[/] "
+            f"({len(messages)} recent messages) "
+            f"[dim]| ESC to go back[/]\n"
+        )
 
         for msg in messages:
             if msg.role == "user":
                 if msg.msg_type == "tool_result":
                     continue
                 log.write(f"[bold blue]USER[/] [dim]{msg.timestamp}[/]")
-                # truncate very long user messages
                 text = msg.text
                 if len(text) > 500:
                     text = text[:500] + "\n[dim]... (truncated)[/]"
@@ -232,8 +249,12 @@ class ClaudeMonitorApp(App):
                 log.write(text)
                 log.write("")
 
+        # move focus to conversation log for scrolling
+        log.focus()
+        self._update_status_bar()
+
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Load conversation on Enter/click."""
+        """Load conversation on Enter."""
         if event.row_key is None:
             return
         sid = str(event.row_key.value)
