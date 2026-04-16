@@ -46,6 +46,7 @@ class ClaudeSession:
     last_message_time: str = ""
     jsonl_path: Path | None = None
     # token usage
+    model: str = ""
     context_tokens: int = 0  # cache_read (current context size)
     input_tokens: int = 0  # new + cache_creation
     output_tokens: int = 0  # generated tokens
@@ -79,15 +80,36 @@ class ClaudeSession:
         return self.input_tokens + self.output_tokens
 
     @property
+    def context_limit(self) -> int:
+        """Max context window for the model."""
+        model = self.model.lower()
+        if "opus" in model:
+            return 1_000_000
+        if "sonnet" in model:
+            return 200_000
+        if "haiku" in model:
+            return 200_000
+        return 200_000  # safe default
+
+    @property
+    def context_pct(self) -> float:
+        if self.context_tokens == 0:
+            return 0.0
+        return (self.context_tokens / self.context_limit) * 100
+
+    @property
     def context_display(self) -> str:
-        """Format context tokens as human-readable (e.g. '103k')."""
+        """Format context as percentage + absolute."""
         if self.context_tokens == 0:
             return "-"
+        pct = self.context_pct
         if self.context_tokens >= 1_000_000:
-            return f"{self.context_tokens / 1_000_000:.1f}M"
-        if self.context_tokens >= 1_000:
-            return f"{self.context_tokens / 1_000:.0f}k"
-        return str(self.context_tokens)
+            abs_str = f"{self.context_tokens / 1_000_000:.1f}M"
+        elif self.context_tokens >= 1_000:
+            abs_str = f"{self.context_tokens / 1_000:.0f}k"
+        else:
+            abs_str = str(self.context_tokens)
+        return f"{pct:.0f}% ({abs_str})"
 
     @property
     def activity_status(self) -> str:
@@ -219,6 +241,7 @@ def _enrich_from_jsonl(session: ClaudeSession) -> None:
     last_context_tokens = 0
     last_input_tokens = 0
     last_output_tokens = 0
+    model = ""
 
     for entry in entries:
         entry_type = entry.get("type", "")
@@ -242,6 +265,8 @@ def _enrich_from_jsonl(session: ClaudeSession) -> None:
         if entry_type == "assistant":
             msg = entry.get("message", {})
             if isinstance(msg, dict):
+                if msg.get("model"):
+                    model = msg["model"]
                 usage = msg.get("usage", {})
                 if usage:
                     last_context_tokens = usage.get("cache_read_input_tokens", 0)
@@ -258,6 +283,8 @@ def _enrich_from_jsonl(session: ClaudeSession) -> None:
     session.last_message_time = last_time
     session.slug = slug
     session.context_tokens = last_context_tokens
+    if model:
+        session.model = model
 
     if first_user_text and not session.first_prompt:
         session.first_prompt = first_user_text

@@ -246,16 +246,15 @@ class ClaudeMonitorApp(App):
         total_input = sum(s.input_tokens for s in self.sessions)
         total_output = sum(s.output_tokens for s in self.sessions)
         total_all = total_input + total_output
+        alive = [s for s in self.sessions if s.is_alive]
+        avg_ctx = sum(s.context_pct for s in alive) / len(alive) if alive else 0
 
-        lines = []
-        lines.append(
-            f"[bold]Session totals:[/] "
-            f"{self._format_tokens(total_input)} in / "
+        self.query_one("#totals-bar", Label).update(
+            f"[bold]Totals:[/] {self._format_tokens(total_input)} in / "
             f"{self._format_tokens(total_output)} out / "
-            f"{self._format_tokens(total_all)} total"
+            f"{self._format_tokens(total_all)} total  "
+            f"[bold]Avg ctx:[/] {avg_ctx:.0f}%"
         )
-
-        self.query_one("#totals-bar", Label).update("\n".join(lines))
 
     def _update_status_bar(self) -> None:
         alive = sum(1 for s in self.sessions if s.is_alive)
