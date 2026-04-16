@@ -17,10 +17,17 @@ from textual.widgets import (
     Static,
 )
 
-from claude_monitor.sessions import ClaudeSession, discover_sessions, get_conversation_text
+from claude_monitor.sessions import (
+    ClaudeSession,
+    ConversationMessage,
+    discover_sessions,
+    get_conversation_text,
+)
+from claude_monitor.window_focus import focus_terminal_window
 
 
 REFRESH_INTERVAL = 5.0
+CONVERSATION_REFRESH_INTERVAL = 3.0
 
 STATUS_DISPLAY = {
     "processing": Text("\u25cf PROCESSING", style="bold yellow"),
@@ -113,12 +120,16 @@ class ClaudeMonitorApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
+        Binding("f", "focus_terminal", "Focus terminal"),
         Binding("escape", "focus_table", "Back to list", show=True),
     ]
 
     sessions: reactive[list[ClaudeSession]] = reactive(list, recompose=False)
     selected_session: reactive[ClaudeSession | None] = reactive(None)
     _viewing_conversation: bool = False
+    _conversation_session_id: str | None = None
+    _conversation_timer = None
+    _last_msg_count: int = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -137,18 +148,38 @@ class ClaudeMonitorApp(App):
         table.focus()
         self._do_refresh()
         self.set_interval(REFRESH_INTERVAL, self._do_refresh)
+        self._start_conversation_refresh()
 
     def action_focus_table(self) -> None:
         """Return focus to the session list."""
         self._viewing_conversation = False
+        self._conversation_session_id = None
+        self._stop_conversation_refresh()
         table = self.query_one("#sessions-table", DataTable)
         table.focus()
-        # restore detail panel for current selection
         if self.selected_session:
             self.query_one("#detail-panel", SessionDetailPanel).update_session(
                 self.selected_session
             )
         self._update_status_bar()
+
+    def action_focus_terminal(self) -> None:
+        """Bring the actual terminal window of the selected session to foreground."""
+        if self.selected_session is None:
+            self.notify("No session selected", severity="warning")
+            return
+        if not self.selected_session.is_alive:
+            self.notify("Session is not running", severity="warning")
+            return
+        self._do_focus_terminal(self.selected_session.pid)
+
+    @work(thread=True)
+    def _do_focus_terminal(self, pid: int) -> None:
+        ok = focus_terminal_window(pid)
+        if not ok:
+            self.call_from_thread(
+                self.notify, "Could not find terminal window", severity="warning"
+            )
 
     @work(thread=True)
     def _do_refresh(self) -> None:
@@ -179,6 +210,8 @@ class ClaudeMonitorApp(App):
             for i, s in enumerate(sessions):
                 if s.session_id == selected_sid:
                     table.move_cursor(row=i)
+                    # update selected_session with fresh data
+                    self.selected_session = s
                     break
 
         self._update_status_bar()
@@ -190,9 +223,9 @@ class ClaudeMonitorApp(App):
         total = len(self.sessions)
 
         if self._viewing_conversation:
-            nav = "ESC: back to list | scroll: up/down | q: quit"
+            nav = "ESC: back | f: focus terminal | scroll: up/down | q: quit"
         else:
-            nav = "Enter: view conversation | r: refresh | q: quit"
+            nav = "Enter: conversation | f: focus terminal | r: refresh | q: quit"
 
         self.query_one("#status-bar", Label).update(
             f" \u25cf {alive} alive ({processing} processing, {waiting} waiting) / "
@@ -206,26 +239,70 @@ class ClaudeMonitorApp(App):
         for s in self.sessions:
             if s.session_id == sid:
                 self.selected_session = s
-                if not self._viewing_conversation:
-                    self.query_one("#detail-panel", SessionDetailPanel).update_session(s)
+                self.query_one("#detail-panel", SessionDetailPanel).update_session(s)
+                # always load conversation for highlighted session
+                self._conversation_session_id = s.session_id
+                self._last_msg_count = 0  # force re-render
+                self._load_conversation(s)
                 break
 
     def action_refresh(self) -> None:
         self._do_refresh()
 
-    @work(thread=True)
-    def _load_conversation(self, session: ClaudeSession) -> None:
-        messages = get_conversation_text(session, max_messages=40)
-        self.call_from_thread(self._render_conversation, session, messages)
+    # -- conversation view with auto-refresh --
 
-    def _render_conversation(self, session: ClaudeSession, messages: list) -> None:
-        self._viewing_conversation = True
+    def _start_conversation_refresh(self) -> None:
+        self._stop_conversation_refresh()
+        self._conversation_timer = self.set_interval(
+            CONVERSATION_REFRESH_INTERVAL, self._refresh_conversation
+        )
+
+    def _stop_conversation_refresh(self) -> None:
+        if self._conversation_timer is not None:
+            self._conversation_timer.stop()
+            self._conversation_timer = None
+
+    def _refresh_conversation(self) -> None:
+        """Auto-refresh: reload conversation for the currently viewed session."""
+        if not self._viewing_conversation or not self._conversation_session_id:
+            return
+        for s in self.sessions:
+            if s.session_id == self._conversation_session_id:
+                self._load_conversation(s, auto_refresh=True)
+                break
+
+    @work(thread=True)
+    def _load_conversation(
+        self, session: ClaudeSession, focus_log: bool = False
+    ) -> None:
+        messages = get_conversation_text(session, max_messages=40)
+        self.call_from_thread(
+            self._render_conversation, session, messages, focus_log
+        )
+
+    def _render_conversation(
+        self,
+        session: ClaudeSession,
+        messages: list[ConversationMessage],
+        focus_log: bool = False,
+    ) -> None:
+        # skip re-render if same session and same message count
+        if (
+            session.session_id == self._conversation_session_id
+            and len(messages) == self._last_msg_count
+            and not focus_log
+        ):
+            return
+
+        self._last_msg_count = len(messages)
+        self._conversation_session_id = session.session_id
+
         log = self.query_one("#conversation-log", RichLog)
         log.clear()
         log.write(
             f"[bold]Conversation: {session.display_name}[/] "
             f"({len(messages)} recent messages) "
-            f"[dim]| ESC to go back[/]\n"
+            f"[dim]| auto-refreshing | f: focus terminal[/]\n"
         )
 
         for msg in messages:
@@ -249,12 +326,15 @@ class ClaudeMonitorApp(App):
                 log.write(text)
                 log.write("")
 
-        # move focus to conversation log for scrolling
-        log.focus()
+        if focus_log:
+            self._viewing_conversation = True
+            log.focus()
+            self._start_conversation_refresh()
+
         self._update_status_bar()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Load conversation on Enter."""
+        """Enter pressed: focus on conversation log for scrolling."""
         if event.row_key is None:
             return
         sid = str(event.row_key.value)
@@ -262,7 +342,7 @@ class ClaudeMonitorApp(App):
             if s.session_id == sid:
                 self.selected_session = s
                 self.query_one("#detail-panel", SessionDetailPanel).update_session(s)
-                self._load_conversation(s)
+                self._load_conversation(s, focus_log=True)
                 break
 
 
