@@ -309,7 +309,7 @@ class ClaudeMonitorApp(App):
             return
         for s in self.sessions:
             if s.session_id == self._conversation_session_id:
-                self._load_conversation(s, auto_refresh=True)
+                self._load_conversation(s)
                 break
 
     @work(thread=True)
