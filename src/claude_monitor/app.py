@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
@@ -12,6 +15,7 @@ from textual.widgets import (
     DataTable,
     Footer,
     Header,
+    Input,
     Label,
     RichLog,
     Static,
@@ -126,6 +130,16 @@ class ClaudeMonitorApp(App):
         padding: 0 1;
     }
 
+    #message-input {
+        dock: bottom;
+        margin: 0 1;
+        display: none;
+    }
+
+    #message-input.visible {
+        display: block;
+    }
+
     #totals-bar {
         height: auto;
         max-height: 5;
@@ -147,6 +161,7 @@ class ClaudeMonitorApp(App):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
         Binding("f", "focus_terminal", "Focus terminal"),
+        Binding("s", "send_message", "Send message"),
         Binding("escape", "focus_table", "Back to list", show=True),
     ]
 
@@ -167,6 +182,10 @@ class ClaudeMonitorApp(App):
             with Vertical(id="right-panel"):
                 yield SessionDetailPanel(id="detail-panel")
                 yield RichLog(id="conversation-log", wrap=True, highlight=True, markup=True)
+                yield Input(
+                    placeholder="Type a message and press Enter (ESC to cancel)",
+                    id="message-input",
+                )
         yield Label("", id="status-bar")
         yield Footer()
 
@@ -184,6 +203,7 @@ class ClaudeMonitorApp(App):
         self._viewing_conversation = False
         self._conversation_session_id = None
         self._stop_conversation_refresh()
+        self.query_one("#message-input", Input).remove_class("visible")
         table = self.query_one("#sessions-table", DataTable)
         table.focus()
         if self.selected_session:
@@ -294,9 +314,9 @@ class ClaudeMonitorApp(App):
         total = len(self.sessions)
 
         if self._viewing_conversation:
-            nav = "ESC: back | f: focus terminal | scroll: up/down | q: quit"
+            nav = "ESC: back | s: send | f: focus | q: quit"
         else:
-            nav = "Enter: conversation | f: focus terminal | r: refresh | q: quit"
+            nav = "Enter: conversation | s: send | f: focus | r: refresh | q: quit"
 
         self.query_one("#status-bar", Label).update(
             f" \u25cf {alive} alive ({processing} processing, {waiting} waiting) / "
@@ -319,6 +339,86 @@ class ClaudeMonitorApp(App):
 
     def action_refresh(self) -> None:
         self._do_refresh()
+
+    def action_send_message(self) -> None:
+        """Show message input for the selected session."""
+        if self.selected_session is None:
+            self.notify("No session selected", severity="warning")
+            return
+        if not self.selected_session.is_alive:
+            self.notify("Session is not running", severity="warning")
+            return
+        msg_input = self.query_one("#message-input", Input)
+        msg_input.add_class("visible")
+        msg_input.value = ""
+        msg_input.focus()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle message submission."""
+        if event.input.id != "message-input":
+            return
+        text = event.value.strip()
+        event.input.value = ""
+        event.input.remove_class("visible")
+
+        if not text or self.selected_session is None:
+            self.query_one("#sessions-table", DataTable).focus()
+            return
+
+        session = self.selected_session
+        log = self.query_one("#conversation-log", RichLog)
+        log.write(f"[bold blue]YOU[/] (sending...)")
+        log.write(text)
+        log.write("")
+        log.focus()
+
+        self._send_to_session(session, text)
+
+    @work(thread=True)
+    def _send_to_session(self, session: ClaudeSession, message: str) -> None:
+        """Send a message to a Claude Code session via CLI."""
+        try:
+            result = subprocess.run(
+                [
+                    "claude",
+                    "-r", session.session_id,
+                    "-p", message,
+                    "--output-format", "text",
+                    "--max-turns", "3",
+                ],
+                capture_output=True,
+                text=True,
+                cwd=session.cwd,
+                timeout=300,
+            )
+
+            response = result.stdout.strip() if result.stdout else ""
+            error = result.stderr.strip() if result.stderr else ""
+
+            if response:
+                self.call_from_thread(self._show_response, session, response)
+            elif error:
+                self.call_from_thread(self._show_response, session, f"[red]Error: {error}[/]")
+            else:
+                self.call_from_thread(self._show_response, session, "[dim](no response)[/]")
+
+        except subprocess.TimeoutExpired:
+            self.call_from_thread(
+                self._show_response, session, "[yellow]Response timed out (5min)[/]"
+            )
+        except Exception as e:
+            self.call_from_thread(
+                self._show_response, session, f"[red]Error: {e}[/]"
+            )
+
+    def _show_response(self, session: ClaudeSession, response: str) -> None:
+        log = self.query_one("#conversation-log", RichLog)
+        log.write(f"[bold green]CLAUDE[/] (response)")
+        log.write(response)
+        log.write("")
+        # refresh conversation to show updated JSONL
+        self._last_msg_count = 0
+        self._load_conversation(session)
 
     # -- conversation view with auto-refresh --
 
