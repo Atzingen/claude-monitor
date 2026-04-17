@@ -24,7 +24,7 @@ from claude_monitor.sessions import (
     get_conversation_text,
     get_usage_info,
 )
-from claude_monitor.window_focus import focus_terminal_window
+from claude_monitor.window_focus import focus_terminal_window, get_session_location
 
 
 REFRESH_INTERVAL = 5.0
@@ -200,11 +200,13 @@ class ClaudeMonitorApp(App):
         if not self.selected_session.is_alive:
             self.notify("Session is not running", severity="warning")
             return
-        self._do_focus_terminal(self.selected_session.pid)
+        self._do_focus_terminal(self.selected_session)
 
     @work(thread=True)
-    def _do_focus_terminal(self, pid: int) -> None:
-        ok, msg = focus_terminal_window(pid)
+    def _do_focus_terminal(self, session: ClaudeSession) -> None:
+        ok, msg = focus_terminal_window(
+            session.pid, slug=session.slug, cwd=session.cwd
+        )
         if not ok:
             self.call_from_thread(
                 self.notify, msg, severity="warning"
