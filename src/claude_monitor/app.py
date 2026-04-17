@@ -28,7 +28,7 @@ from claude_monitor.sessions import (
     get_conversation_text,
     get_usage_info,
 )
-from claude_monitor.window_focus import focus_terminal_window, get_session_location
+from claude_monitor.window_focus import focus_terminal_window
 
 
 REFRESH_INTERVAL = 5.0
