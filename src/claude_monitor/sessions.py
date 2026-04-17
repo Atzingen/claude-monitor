@@ -50,6 +50,9 @@ class ClaudeSession:
     context_tokens: int = 0  # cache_read (current context size)
     input_tokens: int = 0  # new + cache_creation
     output_tokens: int = 0  # generated tokens
+    # real-time activity
+    cpu_percent: float = 0.0
+    jsonl_mtime_age: float = 999.0  # seconds since last JSONL write
 
     @property
     def started_at_str(self) -> str:
@@ -113,14 +116,19 @@ class ClaudeSession:
 
     @property
     def activity_status(self) -> str:
-        """Detect if Claude is processing or waiting for user input."""
+        """Detect session state using CPU + JSONL mtime + last message role."""
         if not self.is_alive:
             return "stopped"
-        if not self.last_message_role:
-            return "unknown"
-        if self.last_message_role == "user":
+        # actively writing to JSONL or using CPU = definitely processing
+        if self.jsonl_mtime_age < 30 or self.cpu_percent > 5:
             return "processing"
-        return "waiting"
+        # no CPU, old mtime = idle/waiting regardless of last role
+        if self.last_message_role == "assistant":
+            return "waiting"
+        # last_message_role == "user" but no activity = stale, treat as waiting
+        if self.jsonl_mtime_age > 60 and self.cpu_percent < 1:
+            return "waiting"
+        return "idle"
 
     @property
     def activity_display(self) -> str:
@@ -129,21 +137,35 @@ class ClaudeSession:
             return "[bold yellow]\u25cf PROCESSING[/]"
         if status == "waiting":
             return "[bold green]\u25cf WAITING[/]"
+        if status == "idle":
+            return "[dim green]\u25cf IDLE[/]"
         if status == "stopped":
             return "[dim]\u25cf STOPPED[/]"
         return "[dim]\u25cb ...[/]"
 
 
-def _get_alive_pids() -> set[int]:
-    """Return set of PIDs for running claude.exe processes."""
-    alive = set()
+def _get_alive_pids() -> dict[int, float]:
+    """Return dict of PID -> cpu_percent for running claude.exe processes."""
+    alive: dict[int, float] = {}
     for proc in psutil.process_iter(["pid", "name"]):
         try:
             name = proc.info["name"].lower()
             if "claude" in name:
-                alive.add(proc.info["pid"])
+                cpu = proc.cpu_percent(interval=0)
+                alive[proc.info["pid"]] = cpu
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
+
+    # second pass for more accurate CPU reading
+    if alive:
+        time.sleep(0.1)
+        for proc in psutil.process_iter(["pid", "name"]):
+            try:
+                if proc.info["pid"] in alive:
+                    alive[proc.info["pid"]] = proc.cpu_percent(interval=0)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
     return alive
 
 
@@ -224,6 +246,7 @@ def _enrich_from_jsonl(session: ClaudeSession) -> None:
         return
 
     session.jsonl_path = jsonl_path
+    session.jsonl_mtime_age = time.time() - jsonl_path.stat().st_mtime
 
     # derive project name from cwd (more accurate than dir encoding)
     if not session.project_name:
@@ -438,6 +461,7 @@ def discover_sessions() -> list[ClaudeSession]:
             kind=raw.get("kind", ""),
             entrypoint=raw.get("entrypoint", ""),
             is_alive=pid in alive_pids,
+            cpu_percent=alive_pids.get(pid, 0.0),
         )
 
         # enrich from index first

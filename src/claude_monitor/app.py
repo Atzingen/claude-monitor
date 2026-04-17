@@ -29,12 +29,20 @@ from claude_monitor.window_focus import focus_terminal_window
 REFRESH_INTERVAL = 5.0
 CONVERSATION_REFRESH_INTERVAL = 3.0
 
-STATUS_DISPLAY = {
-    "processing": Text("\u25cf PROCESSING", style="bold yellow"),
-    "waiting": Text("\u25cf WAITING", style="bold green"),
-    "stopped": Text("\u25cf stopped", style="dim"),
-    "unknown": Text("\u25cb ...", style="dim"),
-}
+SPINNER_FRAMES = ["\u280b", "\u2819", "\u2838", "\u2830", "\u2826", "\u2807"]  # braille spinner
+
+
+def make_status_text(status: str, frame: int = 0) -> Text:
+    if status == "processing":
+        spinner = SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]
+        return Text(f"{spinner} PROCESSING", style="bold yellow")
+    if status == "waiting":
+        return Text("\u25cf WAITING", style="bold green")
+    if status == "idle":
+        return Text("\u25cb IDLE", style="dim green")
+    if status == "stopped":
+        return Text("\u25cf stopped", style="dim")
+    return Text("\u25cb ...", style="dim")
 
 
 class SessionDetailPanel(Static):
@@ -147,6 +155,7 @@ class ClaudeMonitorApp(App):
     _conversation_session_id: str | None = None
     _conversation_timer = None
     _last_msg_count: int = 0
+    _spinner_frame: int = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -166,6 +175,7 @@ class ClaudeMonitorApp(App):
         table.focus()
         self._do_refresh()
         self.set_interval(REFRESH_INTERVAL, self._do_refresh)
+        self.set_interval(0.15, self._tick_spinner)
         self._start_conversation_refresh()
 
     def action_focus_table(self) -> None:
@@ -203,6 +213,21 @@ class ClaudeMonitorApp(App):
                 self.notify, msg, severity="information"
             )
 
+    def _tick_spinner(self) -> None:
+        """Advance spinner animation for PROCESSING sessions."""
+        self._spinner_frame += 1
+        # only update status column cells, not full table refresh
+        table = self.query_one("#sessions-table", DataTable)
+        for i, s in enumerate(self.sessions):
+            if s.activity_status == "processing":
+                try:
+                    table.update_cell_at(
+                        (i, 0),
+                        make_status_text(s.activity_status, self._spinner_frame),
+                    )
+                except Exception:
+                    pass
+
     @work(thread=True)
     def _do_refresh(self) -> None:
         sessions = discover_sessions()
@@ -218,7 +243,7 @@ class ClaudeMonitorApp(App):
 
         table.clear()
         for s in sessions:
-            status = STATUS_DISPLAY.get(s.activity_status, STATUS_DISPLAY["unknown"])
+            status = make_status_text(s.activity_status, self._spinner_frame)
             table.add_row(
                 status,
                 s.display_name,
