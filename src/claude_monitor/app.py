@@ -376,8 +376,6 @@ class ClaudeMonitorApp(App):
 
         for msg in messages:
             if msg.role == "user":
-                if msg.msg_type == "tool_result":
-                    continue
                 log.write(f"[bold blue]USER[/] [dim]{msg.timestamp}[/]")
                 text = msg.text
                 if len(text) > 500:
@@ -386,13 +384,14 @@ class ClaudeMonitorApp(App):
                 log.write("")
             elif msg.role == "assistant":
                 if msg.msg_type == "tool_use":
-                    log.write(f"[bold magenta]CLAUDE[/] [dim]{msg.timestamp}[/]")
+                    log.write(f"[dim cyan]TOOLS[/] [dim]{msg.timestamp}[/]")
+                    log.write(f"[dim]{msg.text}[/]")
                 else:
                     log.write(f"[bold green]CLAUDE[/] [dim]{msg.timestamp}[/]")
-                text = msg.text
-                if len(text) > 1000:
-                    text = text[:1000] + "\n[dim]... (truncated)[/]"
-                log.write(text)
+                    text = msg.text
+                    if len(text) > 1000:
+                        text = text[:1000] + "\n[dim]... (truncated)[/]"
+                    log.write(text)
                 log.write("")
 
         if focus_log:

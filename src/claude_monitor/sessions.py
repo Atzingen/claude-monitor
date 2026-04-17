@@ -377,6 +377,58 @@ def _project_dir_to_name(project_dir: str, cwd: str = "") -> str:
     return Path(full).name
 
 
+def _format_tool_use(block: dict) -> str:
+    """Format a tool_use block into a human-readable summary."""
+    name = block.get("name", "?")
+    inp = block.get("input", {})
+    if not isinstance(inp, dict):
+        return f"[tool: {name}]"
+
+    if name == "Read":
+        path = inp.get("file_path", "")
+        return f"  Read {_short_path(path)}"
+    if name == "Write":
+        path = inp.get("file_path", "")
+        return f"  Write {_short_path(path)}"
+    if name == "Edit":
+        path = inp.get("file_path", "")
+        return f"  Edit {_short_path(path)}"
+    if name == "Bash":
+        cmd = inp.get("command", "")[:80]
+        desc = inp.get("description", "")
+        if desc:
+            return f"  $ {desc}"
+        return f"  $ {cmd}"
+    if name == "Grep":
+        pattern = inp.get("pattern", "")
+        return f'  Grep "{pattern}"'
+    if name == "Glob":
+        pattern = inp.get("pattern", "")
+        return f"  Glob {pattern}"
+    if name == "Agent":
+        desc = inp.get("description", "")
+        return f"  Agent: {desc}"
+    if name == "TaskCreate":
+        desc = inp.get("description", "")
+        return f"  + Task: {desc}"
+    if name == "TaskUpdate":
+        status = inp.get("status", "")
+        return f"  Task -> {status}"
+    if name in ("WebSearch", "WebFetch"):
+        query = inp.get("query", inp.get("url", ""))
+        return f"  {name}: {query[:60]}"
+
+    return f"  [{name}]"
+
+
+def _short_path(path: str) -> str:
+    """Shorten a file path to last 2 components."""
+    parts = path.replace("\\", "/").split("/")
+    if len(parts) > 2:
+        return "/".join(parts[-2:])
+    return path
+
+
 def get_conversation_text(session: ClaudeSession, max_messages: int = 50) -> list[ConversationMessage]:
     """Read the conversation messages from a session's JSONL file."""
     if session.jsonl_path is None:
@@ -386,7 +438,7 @@ def get_conversation_text(session: ClaudeSession, max_messages: int = 50) -> lis
     else:
         jsonl_path = session.jsonl_path
 
-    entries = _read_jsonl_tail(jsonl_path, max_lines=max_messages * 3)
+    entries = _read_jsonl_tail(jsonl_path, max_lines=max_messages * 4)
 
     messages: list[ConversationMessage] = []
     for entry in entries:
@@ -403,6 +455,7 @@ def get_conversation_text(session: ClaudeSession, max_messages: int = 50) -> lis
         content = msg.get("content", "")
         text_parts: list[str] = []
         msg_type = "text"
+        has_text = False
 
         if isinstance(content, list):
             for block in content:
@@ -410,17 +463,31 @@ def get_conversation_text(session: ClaudeSession, max_messages: int = 50) -> lis
                     continue
                 block_type = block.get("type", "")
                 if block_type == "text":
-                    text_parts.append(block.get("text", ""))
+                    text = block.get("text", "").strip()
+                    if text:
+                        text_parts.append(text)
+                        has_text = True
+                elif block_type == "thinking":
+                    thinking = block.get("thinking", "").strip()
+                    if thinking:
+                        # show first line of thinking
+                        first_line = thinking.split("\n")[0][:100]
+                        text_parts.append(f"  (thinking: {first_line})")
                 elif block_type == "tool_use":
-                    tool_name = block.get("name", "unknown")
                     msg_type = "tool_use"
-                    text_parts.append(f"[tool: {tool_name}]")
+                    text_parts.append(_format_tool_use(block))
                 elif block_type == "tool_result":
                     msg_type = "tool_result"
-                    # skip verbose tool results
+                    # skip user tool_result messages (verbose output)
                     continue
         elif isinstance(content, str):
-            text_parts.append(content)
+            if content.strip():
+                text_parts.append(content.strip())
+                has_text = True
+
+        # skip empty user messages (tool_results with no text)
+        if role == "user" and not has_text:
+            continue
 
         text = "\n".join(text_parts).strip()
         if not text:
@@ -433,8 +500,23 @@ def get_conversation_text(session: ClaudeSession, max_messages: int = 50) -> lis
             msg_type=msg_type,
         ))
 
-    # return last max_messages
-    return messages[-max_messages:]
+    # merge consecutive assistant tool_use messages into one
+    merged: list[ConversationMessage] = []
+    for msg in messages:
+        if (
+            merged
+            and merged[-1].role == "assistant"
+            and msg.role == "assistant"
+            and merged[-1].msg_type == "tool_use"
+            and msg.msg_type == "tool_use"
+        ):
+            # merge into previous
+            merged[-1].text += "\n" + msg.text
+            merged[-1].timestamp = msg.timestamp
+        else:
+            merged.append(msg)
+
+    return merged[-max_messages:]
 
 
 def discover_sessions() -> list[ClaudeSession]:
