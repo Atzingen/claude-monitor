@@ -22,6 +22,7 @@ from claude_monitor.sessions import (
     ConversationMessage,
     discover_sessions,
     get_conversation_text,
+    get_usage_info,
 )
 from claude_monitor.window_focus import focus_terminal_window
 
@@ -272,18 +273,17 @@ class ClaudeMonitorApp(App):
         return str(n)
 
     def _update_totals_bar(self) -> None:
-        total_input = sum(s.input_tokens for s in self.sessions)
-        total_output = sum(s.output_tokens for s in self.sessions)
-        total_all = total_input + total_output
+        usage = get_usage_info()
         alive = [s for s in self.sessions if s.is_alive]
         avg_ctx = sum(s.context_pct for s in alive) / len(alive) if alive else 0
+        max_ctx = max((s.context_pct for s in alive), default=0)
 
-        self.query_one("#totals-bar", Label).update(
-            f"[bold]Totals:[/] {self._format_tokens(total_input)} in / "
-            f"{self._format_tokens(total_output)} out / "
-            f"{self._format_tokens(total_all)} total  "
-            f"[bold]Avg ctx:[/] {avg_ctx:.0f}%"
-        )
+        parts = []
+        parts.append(f"[bold]Weekly:[/] {usage.weekly_pct}%")
+        parts.append(f"[bold]Session:[/] {usage.session_pct}%")
+        parts.append(f"[bold]Ctx:[/] avg {avg_ctx:.0f}% max {max_ctx:.0f}%")
+
+        self.query_one("#totals-bar", Label).update(" | ".join(parts))
 
     def _update_status_bar(self) -> None:
         alive = sum(1 for s in self.sessions if s.is_alive)

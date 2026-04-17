@@ -13,6 +13,7 @@ import psutil
 CLAUDE_DIR = Path.home() / ".claude"
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
+USAGE_CACHE = Path.home() / ".cache" / "ccstatusline" / "usage.json"
 
 
 @dataclass
@@ -517,6 +518,30 @@ def get_conversation_text(session: ClaudeSession, max_messages: int = 50) -> lis
             merged.append(msg)
 
     return merged[-max_messages:]
+
+
+@dataclass
+class UsageInfo:
+    session_pct: int = 0
+    weekly_pct: int = 0
+    session_reset: str = ""
+    weekly_reset: str = ""
+
+
+def get_usage_info() -> UsageInfo:
+    """Read usage data from ccstatusline cache."""
+    if not USAGE_CACHE.exists():
+        return UsageInfo()
+    try:
+        data = json.loads(USAGE_CACHE.read_text(encoding="utf-8"))
+        return UsageInfo(
+            session_pct=data.get("sessionUsage", 0),
+            weekly_pct=data.get("weeklyUsage", 0),
+            session_reset=data.get("sessionResetAt", ""),
+            weekly_reset=data.get("weeklyResetAt", ""),
+        )
+    except (json.JSONDecodeError, OSError):
+        return UsageInfo()
 
 
 def discover_sessions() -> list[ClaudeSession]:
