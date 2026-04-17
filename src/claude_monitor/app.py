@@ -172,6 +172,7 @@ class ClaudeMonitorApp(App):
     _conversation_timer = None
     _last_msg_count: int = 0
     _spinner_frame: int = 0
+    _rebuilding_table: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -257,6 +258,7 @@ class ClaudeMonitorApp(App):
         self.call_from_thread(self._update_table, sessions)
 
     def _update_table(self, sessions: list[ClaudeSession]) -> None:
+        self._rebuilding_table = True
         self.sessions = sessions
         table = self.query_one("#sessions-table", DataTable)
 
@@ -284,6 +286,7 @@ class ClaudeMonitorApp(App):
                     self.selected_session = s
                     break
 
+        self._rebuilding_table = False
         self._update_totals_bar()
         self._update_status_bar()
 
@@ -324,6 +327,9 @@ class ClaudeMonitorApp(App):
         )
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        # skip events fired during table rebuild to prevent conversation flicker
+        if self._rebuilding_table:
+            return
         if event.row_key is None:
             return
         sid = str(event.row_key.value)
@@ -331,9 +337,8 @@ class ClaudeMonitorApp(App):
             if s.session_id == sid:
                 self.selected_session = s
                 self.query_one("#detail-panel", SessionDetailPanel).update_session(s)
-                # always load conversation for highlighted session
                 self._conversation_session_id = s.session_id
-                self._last_msg_count = 0  # force re-render
+                self._last_msg_count = 0
                 self._load_conversation(s)
                 break
 
